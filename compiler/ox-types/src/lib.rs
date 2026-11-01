@@ -3,16 +3,21 @@ use ox_diagnostics::Diagnostic;
 use std::collections::HashSet;
 
 pub fn check(program: &Program) -> Result<(), Diagnostic> {
-    check_shapes(program)?;
+    check_nominal_types(program)?;
     check_entrypoint(program)
 }
 
-fn check_shapes(program: &Program) -> Result<(), Diagnostic> {
+fn check_nominal_types(program: &Program) -> Result<(), Diagnostic> {
     let builtins = ["Int", "Bool", "String", "Unit", "Json"];
-    let shape_names: HashSet<&str> = program
+    let nominal_names: HashSet<&str> = program
         .declarations
         .iter()
-        .filter(|declaration| declaration.kind == DeclarationKind::Shape)
+        .filter(|declaration| {
+            matches!(
+                declaration.kind,
+                DeclarationKind::Shape | DeclarationKind::Choice
+            )
+        })
         .map(|declaration| declaration.name.as_str())
         .collect();
 
@@ -33,7 +38,7 @@ fn check_shapes(program: &Program) -> Result<(), Diagnostic> {
                 ));
             }
             if !builtins.contains(&field.type_name.as_str())
-                && !shape_names.contains(field.type_name.as_str())
+                && !nominal_names.contains(field.type_name.as_str())
             {
                 return Err(Diagnostic::new(
                     format!("unknown type '{}'", field.type_name),
@@ -45,6 +50,35 @@ fn check_shapes(program: &Program) -> Result<(), Diagnostic> {
                     format!("shape '{}' cannot contain itself directly", shape.name),
                     0..0,
                 ));
+            }
+        }
+    }
+
+    let mut all_variants = HashSet::new();
+    for choice in program
+        .declarations
+        .iter()
+        .filter(|declaration| declaration.kind == DeclarationKind::Choice)
+    {
+        let mut choice_variants = HashSet::new();
+        for variant in &choice.variants {
+            if !choice_variants.insert(variant.name.as_str())
+                || !all_variants.insert(variant.name.as_str())
+            {
+                return Err(Diagnostic::new(
+                    format!("variant '{}' is already defined", variant.name),
+                    0..0,
+                ));
+            }
+            if let Some(payload_type) = &variant.payload_type {
+                if !builtins.contains(&payload_type.as_str())
+                    && !nominal_names.contains(payload_type.as_str())
+                {
+                    return Err(Diagnostic::new(
+                        format!("unknown type '{}'", payload_type),
+                        0..0,
+                    ));
+                }
             }
         }
     }
@@ -87,6 +121,22 @@ mod tests {
         let program =
             parse(&lex("shape User { id: Int, id: Int, } fx main() {}").unwrap()).unwrap();
         assert!(check(&program)
+            .unwrap_err()
+            .message
+            .contains("already defined"));
+    }
+
+    #[test]
+    fn accepts_choice_payload_types_and_rejects_duplicate_variants() {
+        let valid = parse(
+            &lex("shape User { id: Int, } choice Result { Ok(User), Missing, } fx main() {}")
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(check(&valid).is_ok());
+        let duplicate =
+            parse(&lex("choice Result { Ok(Int), Ok(String), } fx main() {}").unwrap()).unwrap();
+        assert!(check(&duplicate)
             .unwrap_err()
             .message
             .contains("already defined"));

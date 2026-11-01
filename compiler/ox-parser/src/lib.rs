@@ -1,4 +1,4 @@
-use ox_ast::{Declaration, DeclarationKind, Field, Program};
+use ox_ast::{Declaration, DeclarationKind, Field, Program, Variant};
 use ox_diagnostics::Diagnostic;
 use ox_lexer::{Token, TokenKind, RESERVED_KEYWORDS};
 
@@ -34,6 +34,7 @@ pub fn parse(tokens: &[Token]) -> Result<Program, Diagnostic> {
                     kind,
                     name: name.clone(),
                     fields: Vec::new(),
+                    variants: Vec::new(),
                 });
                 cursor += 2;
             }
@@ -51,11 +52,17 @@ pub fn parse(tokens: &[Token]) -> Result<Program, Diagnostic> {
                     kind: DeclarationKind::Use,
                     name: name.clone(),
                     fields: Vec::new(),
+                    variants: Vec::new(),
                 });
                 cursor += 2;
             }
             TokenKind::Keyword(word) if word == "shape" => {
                 let (declaration, next) = parse_shape(tokens, cursor)?;
+                declarations.push(declaration);
+                cursor = next;
+            }
+            TokenKind::Keyword(word) if word == "choice" => {
+                let (declaration, next) = parse_choice(tokens, cursor)?;
                 declarations.push(declaration);
                 cursor = next;
             }
@@ -129,6 +136,81 @@ fn parse_shape(tokens: &[Token], start: usize) -> Result<(Declaration, usize), D
             kind: DeclarationKind::Shape,
             name: name.clone(),
             fields,
+            variants: Vec::new(),
+        },
+        cursor + 1,
+    ))
+}
+
+fn parse_choice(tokens: &[Token], start: usize) -> Result<(Declaration, usize), Diagnostic> {
+    let name_token = tokens
+        .get(start + 1)
+        .ok_or_else(|| Diagnostic::new("expected choice name", tokens[start].span.clone()))?;
+    let TokenKind::Identifier(name) = &name_token.kind else {
+        return Err(Diagnostic::new(
+            "expected choice name",
+            name_token.span.clone(),
+        ));
+    };
+    if !name.chars().next().is_some_and(char::is_uppercase) {
+        return Err(Diagnostic::new(
+            "choice names must begin with an uppercase letter",
+            name_token.span.clone(),
+        ));
+    }
+
+    expect_symbol(tokens, start + 2, "{")?;
+    let mut cursor = start + 3;
+    let mut variants = Vec::new();
+    while !is_symbol(tokens.get(cursor), "}") {
+        let variant_token = tokens
+            .get(cursor)
+            .ok_or_else(|| Diagnostic::new("expected variant name", name_token.span.clone()))?;
+        let TokenKind::Identifier(variant_name) = &variant_token.kind else {
+            return Err(Diagnostic::new(
+                "expected variant name",
+                variant_token.span.clone(),
+            ));
+        };
+        let mut payload_type = None;
+        cursor += 1;
+        if is_symbol(tokens.get(cursor), "(") {
+            let payload_token = tokens.get(cursor + 1).ok_or_else(|| {
+                Diagnostic::new("expected variant payload type", variant_token.span.clone())
+            })?;
+            let TokenKind::Identifier(type_name) = &payload_token.kind else {
+                return Err(Diagnostic::new(
+                    "expected variant payload type",
+                    payload_token.span.clone(),
+                ));
+            };
+            expect_symbol(tokens, cursor + 2, ")")?;
+            payload_type = Some(type_name.clone());
+            cursor += 3;
+        }
+        variants.push(Variant {
+            name: variant_name.clone(),
+            payload_type,
+        });
+        if is_symbol(tokens.get(cursor), ",") {
+            cursor += 1;
+        } else if !is_symbol(tokens.get(cursor), "}") {
+            let span = tokens
+                .get(cursor)
+                .map_or(variant_token.span.clone(), |token| token.span.clone());
+            return Err(Diagnostic::new(
+                "expected ',' or '}' after choice variant",
+                span,
+            ));
+        }
+    }
+
+    Ok((
+        Declaration {
+            kind: DeclarationKind::Choice,
+            name: name.clone(),
+            fields: Vec::new(),
+            variants,
         },
         cursor + 1,
     ))
@@ -172,5 +254,17 @@ mod tests {
         assert_eq!(program.declarations[0].kind, DeclarationKind::Shape);
         assert_eq!(program.declarations[0].fields.len(), 2);
         assert_eq!(program.declarations[0].fields[1].name, "name");
+    }
+
+    #[test]
+    fn parses_choice_variants() {
+        let tokens = lex("choice Result { Ok(Int), Missing, } fx main() {}").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(program.declarations[0].kind, DeclarationKind::Choice);
+        assert_eq!(program.declarations[0].variants.len(), 2);
+        assert_eq!(
+            program.declarations[0].variants[0].payload_type.as_deref(),
+            Some("Int")
+        );
     }
 }
