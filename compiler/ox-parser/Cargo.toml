@@ -1,0 +1,11 @@
+[package]
+name = "ox-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ox-ast = { path = "../ox-ast" }
+ox-diagnostics = { path = "../ox-diagnostics" }
+ox-lexer = { path = "../ox-lexer" }
+

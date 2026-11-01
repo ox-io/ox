@@ -1,0 +1,15 @@
+[package]
+name = "ox-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ox"
+path = "src/main.rs"
+
+[dependencies]
+ox-lexer = { path = "../../compiler/ox-lexer" }
+ox-parser = { path = "../../compiler/ox-parser" }
+ox-types = { path = "../../compiler/ox-types" }
+

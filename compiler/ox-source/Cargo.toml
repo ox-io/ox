@@ -1,0 +1,6 @@
+[package]
+name = "ox-source"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+

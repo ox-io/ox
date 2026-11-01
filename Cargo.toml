@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "compiler/ox-source",
+    "compiler/ox-diagnostics",
+    "compiler/ox-lexer",
+    "compiler/ox-ast",
+    "compiler/ox-parser",
+    "compiler/ox-types",
+    "compiler/ox-formatter",
+    "compiler/ox-codegen-js",
+    "runtime/ox-runtime",
+    "tools/ox-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/oxlang/ox"
+
