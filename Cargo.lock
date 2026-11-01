@@ -60,4 +60,6 @@ version = "0.2.0"
 dependencies = [
  "ox-ast",
  "ox-diagnostics",
+ "ox-lexer",
+ "ox-parser",
 ]

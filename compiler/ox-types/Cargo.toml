@@ -8,3 +8,7 @@ license.workspace = true
 ox-ast = { path = "../ox-ast" }
 ox-diagnostics = { path = "../ox-diagnostics" }
 
+[dev-dependencies]
+ox-lexer = { path = "../ox-lexer" }
+ox-parser = { path = "../ox-parser" }
+

@@ -1,6 +1,6 @@
 use ox_lexer::{lex, CANONICAL_KEYWORDS, RESERVED_KEYWORDS};
 use ox_parser::parse;
-use ox_types::check_entrypoint;
+use ox_types::check;
 use std::env;
 use std::fs;
 use std::process::ExitCode;
@@ -36,7 +36,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
             let source = fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
             let tokens = lex(&source).map_err(|error| format!("{path}: {error}"))?;
             let program = parse(&tokens).map_err(|error| format!("{path}: {error}"))?;
-            check_entrypoint(&program).map_err(|error| format!("{path}: {error}"))?;
+            check(&program).map_err(|error| format!("{path}: {error}"))?;
             Ok(format!("Checked {path}"))
         }
         _ => Err("usage: ox <check FILE|keywords|version>".into()),

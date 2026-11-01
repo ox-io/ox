@@ -2,13 +2,13 @@ use ox_diagnostics::Diagnostic;
 use std::ops::Range;
 
 pub const CANONICAL_KEYWORDS: &[&str] = &[
-    "fx", "val", "mut", "ret", "if", "else", "loop", "stop", "skip", "api", "use", "true", "false",
-    "GET", "POST", "PUT", "PATCH", "DELETE",
+    "fx", "val", "mut", "ret", "if", "else", "loop", "stop", "skip", "api", "use", "GET", "POST",
+    "PUT", "PATCH", "DELETE", "true", "false", "shape",
 ];
 
 pub const RESERVED_KEYWORDS: &[&str] = &[
-    "shape", "choice", "pick", "case", "other", "none", "try", "catch", "fail", "defer", "task",
-    "wait", "spawn", "race", "chan", "recv", "as", "pub", "trait", "impl", "self", "test",
+    "choice", "pick", "case", "other", "none", "try", "catch", "fail", "defer", "task", "wait",
+    "spawn", "race", "chan", "recv", "as", "pub", "trait", "impl", "self", "test",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
