@@ -29,6 +29,7 @@ impl Parser<'_> {
                 Some("choice") => self.parse_choice()?,
                 Some("fx") => self.parse_function()?,
                 Some("api") => self.parse_api()?,
+                Some("test") => self.parse_test()?,
                 _ => return self.error("expected a top-level declaration"),
             });
         }
@@ -143,6 +144,15 @@ impl Parser<'_> {
                 body,
             });
         }
+        Ok(declaration)
+    }
+
+    fn parse_test(&mut self) -> Result<Declaration, Diagnostic> {
+        self.expect_keyword("test")?;
+        let name = self.string("expected test name")?;
+        let mut declaration = self.declaration(DeclarationKind::Test, name);
+        declaration.return_type = Some("Unit".into());
+        declaration.body = Some(self.block()?);
         Ok(declaration)
     }
 

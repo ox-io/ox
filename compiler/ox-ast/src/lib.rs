@@ -130,4 +130,5 @@ pub enum DeclarationKind {
     Use,
     Shape,
     Choice,
+    Test,
 }
