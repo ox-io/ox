@@ -5,7 +5,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
   attestations: write
 
@@ -34,3 +34,25 @@ jobs:
           path: |
             ${{ env.OX_BINARY }}
             ${{ env.OX_BINARY }}.sha256
+
+  publish:
+    needs: cli
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Normalize asset names
+        shell: bash
+        run: |
+          mkdir release
+          for directory in dist/*; do
+            label="$(basename "$directory")"
+            if [ -f "$directory/ox.exe" ]; then extension=".exe"; else extension=""; fi
+            cp "$directory/ox$extension" "release/$label$extension"
+            sha256sum "release/$label$extension" > "release/$label$extension.sha256"
+          done
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" release/* --verify-tag --generate-notes
