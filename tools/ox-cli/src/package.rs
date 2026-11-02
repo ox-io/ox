@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -111,6 +112,7 @@ struct Locked {
     checksum: String,
     cache: PathBuf,
     capabilities: String,
+    signature: String,
 }
 
 pub fn lock(offline: bool, update: bool) -> Result<String, String> {
@@ -126,24 +128,58 @@ pub fn lock(offline: bool, update: bool) -> Result<String, String> {
     };
     let mut queue = dependencies;
     let mut resolved: BTreeMap<String, Locked> = BTreeMap::new();
+    let mut constraints: BTreeMap<String, Vec<String>> = BTreeMap::new();
     while let Some(dependency) = queue.pop() {
+        if let Source::Registry { requirement, .. } = &dependency.source {
+            let values = constraints.entry(dependency.name.clone()).or_default();
+            if !values.contains(requirement) {
+                values.push(requirement.clone());
+                values.sort();
+            }
+        }
         if let Some(package) = resolved.get(&dependency.name) {
-            if let Source::Registry { requirement, .. } = &dependency.source {
+            if matches!(dependency.source, Source::Registry { .. }) {
                 let selected = Version::parse(&package.version)?;
-                if !selected.matches(requirement) {
+                let requirements = &constraints[&dependency.name];
+                if requirements
+                    .iter()
+                    .all(|requirement| selected.matches(requirement))
+                {
+                    continue;
+                }
+                if offline {
                     return Err(format!(
-                        "dependency conflict for '{}': selected {}, but another package requires {}",
-                        dependency.name, package.version, requirement
+                        "locked version {} of '{}' violates constraints {}",
+                        package.version,
+                        dependency.name,
+                        requirements.join(", ")
                     ));
                 }
+                let replacement = resolve(
+                    &dependency,
+                    false,
+                    &cache_root,
+                    existing.get(&dependency.name),
+                    requirements,
+                )?;
+                let child_manifest = fs::read_to_string(replacement.cache.join("ox.toml"))
+                    .map_err(|e| format!("dependency '{}': {e}", replacement.name))?;
+                queue.extend(parse_dependencies(&child_manifest)?);
+                resolved.insert(replacement.name.clone(), replacement);
+                continue;
             }
             continue;
         }
+        let requirements = constraints
+            .get(&dependency.name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let package = resolve(
             &dependency,
             offline,
             &cache_root,
             existing.get(&dependency.name),
+            requirements,
         )?;
         let child_manifest = fs::read_to_string(package.cache.join("ox.toml"))
             .map_err(|e| format!("dependency '{}': {e}", package.name))?;
@@ -242,11 +278,215 @@ pub fn audit() -> Result<String, String> {
     }
 }
 
+pub fn resolve_import(module: &str, project_root: &Path) -> Result<Option<PathBuf>, String> {
+    let mut components = module.split('.');
+    let Some(package_name) = components.next() else {
+        return Ok(None);
+    };
+    let lock_path = project_root.join("ox.lock");
+    let locked = parse_lock_from(&lock_path)?;
+    let application =
+        fs::read_to_string(project_root.join("ox.toml")).map_err(|e| format!("ox.toml: {e}"))?;
+    let lock_source = fs::read_to_string(&lock_path).map_err(|e| e.to_string())?;
+    let rendered = render_lock(&application, &locked.values().cloned().collect::<Vec<_>>());
+    if lock_source != rendered {
+        return Err("ox.lock integrity chain is stale or modified; run 'ox lock'".into());
+    }
+    let Some(package) = locked.get(package_name) else {
+        return Ok(None);
+    };
+    verify_cached(package)?;
+    let granted = capability_set(&application)?;
+    for required in package
+        .capabilities
+        .split(',')
+        .filter(|value| !value.is_empty())
+    {
+        if !granted.contains(required) {
+            return Err(format!(
+                "package '{}' requires capability '{required}'",
+                package.name
+            ));
+        }
+    }
+    let path = components
+        .map(|value| {
+            validate_name(value)?;
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .join("/");
+    let candidates = if path.is_empty() {
+        vec![
+            package.cache.join("src/lib.ox"),
+            package.cache.join("lib.ox"),
+        ]
+    } else {
+        vec![
+            package.cache.join(format!("src/{path}.ox")),
+            package.cache.join(format!("{path}.ox")),
+        ]
+    };
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .map(Some)
+        .ok_or_else(|| format!("module '{module}' does not exist in package '{package_name}'"))
+}
+
+pub fn enforce_program_capabilities(source: &str, project_root: &Path) -> Result<(), String> {
+    let manifest_path = project_root.join("ox.toml");
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+    let manifest = fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?;
+    let granted = capability_set(&manifest)?;
+    let checks = [
+        (
+            "network",
+            ["http_get(", "http_post(", "http_put(", "http_delete("].as_slice(),
+        ),
+        ("environment", ["env_get("].as_slice()),
+        ("filesystem", ["file_read(", "file_write("].as_slice()),
+        ("secrets", ["secret_get("].as_slice()),
+    ];
+    for (capability, markers) in checks {
+        if markers.iter().any(|marker| source.contains(marker)) && !granted.contains(capability) {
+            return Err(format!(
+                "program uses '{capability}' without granting it in [capabilities]"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn pack(output: Option<&str>) -> Result<String, String> {
+    let root = fs::canonicalize(".").map_err(|e| e.to_string())?;
+    let manifest = fs::read_to_string(root.join("ox.toml")).map_err(|e| format!("ox.toml: {e}"))?;
+    validate_capabilities(&manifest)?;
+    parse_dependencies(&manifest)?;
+    let name = package_name(&root)?;
+    let version = package_version(&root)?;
+    let target = output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("{name}-{version}.oxpkg")));
+    write_archive(&root, &target)?;
+    Ok(format!("Packed {}", target.display()))
+}
+
+fn write_archive(root: &Path, target: &Path) -> Result<(), String> {
+    let mut files = Vec::new();
+    collect_files(root, root, &mut files)?;
+    files.sort();
+    let mut archive = fs::File::create(target).map_err(|e| e.to_string())?;
+    archive.write_all(b"OXPKG1\n").map_err(|e| e.to_string())?;
+    archive
+        .write_all(format!("checksum={}\nfiles={}\n", tree_hash(root)?, files.len()).as_bytes())
+        .map_err(|e| e.to_string())?;
+    for relative in files {
+        if relative == target {
+            continue;
+        }
+        let data = fs::read(root.join(&relative)).map_err(|e| e.to_string())?;
+        let name = relative.to_string_lossy();
+        archive
+            .write_all(format!("{} {}\n", name.len(), data.len()).as_bytes())
+            .map_err(|e| e.to_string())?;
+        archive
+            .write_all(name.as_bytes())
+            .map_err(|e| e.to_string())?;
+        archive.write_all(&data).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn publish(registry: Option<&str>) -> Result<String, String> {
+    let registry = registry
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("OX_REGISTRY").map(PathBuf::from))
+        .ok_or("publish requires --registry PATH or OX_REGISTRY")?;
+    if registry.to_string_lossy().contains("://") {
+        return Err("alpha.8 publishing requires a local registry checkout".into());
+    }
+    let root = fs::canonicalize(".").map_err(|e| e.to_string())?;
+    let registry = if registry.is_absolute() {
+        registry
+    } else {
+        root.join(registry)
+    };
+    if registry.starts_with(&root) {
+        return Err("registry must be outside the package being published".into());
+    }
+    let name = package_name(&root)?;
+    validate_name(&name)?;
+    let version = package_version(&root)?;
+    Version::parse(&version)?;
+    let target = registry.join(&name).join(&version);
+    if target.exists() {
+        return Err(format!("package {name} {version} already exists"));
+    }
+    fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
+    copy_tree(&root, &target)?;
+    let checksum = tree_hash(&target)?;
+    fs::write(target.join(".ox-checksum"), format!("{checksum}\n")).map_err(|e| e.to_string())?;
+    let key = env::var("OX_SIGNING_KEY_ID").unwrap_or_else(|_| "unsigned".into());
+    let signature = env::var("OX_SIGNATURE").unwrap_or_else(|_| "unsigned".into());
+    fs::write(
+        target.join(".ox-signature"),
+        format!("key={key}\nsignature={signature}\n"),
+    )
+    .map_err(|e| e.to_string())?;
+    write_archive(&target, &target.join(format!("{name}-{version}.oxpkg")))?;
+    Ok(format!(
+        "Published {name} {version} to {}",
+        registry.display()
+    ))
+}
+
+pub fn workspace() -> Result<String, String> {
+    let manifest = fs::read_to_string("ox.toml").map_err(|e| format!("ox.toml: {e}"))?;
+    let member_line = section_lines(&manifest, "workspace")
+        .into_iter()
+        .find(|line| line.starts_with("members"))
+        .ok_or("[workspace] requires members = [...] ")?;
+    let raw = member_line
+        .split_once('=')
+        .ok_or("invalid workspace members")?
+        .1
+        .trim();
+    if !raw.starts_with('[') || !raw.ends_with(']') {
+        return Err("workspace members must be an array".into());
+    }
+    let mut names = BTreeSet::new();
+    let mut count = 0;
+    for value in raw[1..raw.len() - 1]
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let member = PathBuf::from(unquote(value)?);
+        let canonical = fs::canonicalize(&member)
+            .map_err(|e| format!("workspace member {}: {e}", member.display()))?;
+        let name = package_name(&canonical)?;
+        if !names.insert(name.clone()) {
+            return Err(format!("duplicate workspace package '{name}'"));
+        }
+        let original = env::current_dir().map_err(|e| e.to_string())?;
+        env::set_current_dir(&canonical).map_err(|e| e.to_string())?;
+        let result = lock(false, false);
+        env::set_current_dir(&original).map_err(|e| e.to_string())?;
+        result.map_err(|error| format!("workspace package '{name}': {error}"))?;
+        count += 1;
+    }
+    Ok(format!("Resolved {count} workspace packages"))
+}
+
 fn resolve(
     dependency: &Dependency,
     offline: bool,
     cache_root: &Path,
     old: Option<&Locked>,
+    requirements: &[String],
 ) -> Result<Locked, String> {
     if offline {
         let package = old
@@ -275,7 +515,7 @@ fn resolve(
             (format!("git+{url}#{revision}"), package_version(&staging)?)
         }
         Source::Registry {
-            requirement,
+            requirement: _,
             registry,
         } => {
             let registry = registry
@@ -298,20 +538,51 @@ fn resolve(
                         .ok()
                         .map(|v| (v, e.path()))
                 })
-                .filter(|(v, _)| v.matches(requirement))
+                .filter(|(v, _)| {
+                    requirements
+                        .iter()
+                        .all(|requirement| v.matches(requirement))
+                })
                 .collect::<Vec<_>>();
             candidates.sort_by(|a, b| b.0.cmp(&a.0));
             let (version, path) = candidates.into_iter().next().ok_or_else(|| {
                 format!(
-                    "no version of '{}' satisfies '{requirement}'",
-                    dependency.name
+                    "no version of '{}' satisfies constraints {}",
+                    dependency.name,
+                    requirements.join(", ")
                 )
             })?;
+            if path.join(".ox-checksum").is_file() {
+                let expected =
+                    fs::read_to_string(path.join(".ox-checksum")).map_err(|e| e.to_string())?;
+                let actual = tree_hash(&path)?;
+                if expected.trim() != actual {
+                    return Err(format!(
+                        "registry checksum mismatch for '{}'",
+                        dependency.name
+                    ));
+                }
+            }
             copy_tree(&path, &staging)?;
+            let declared = package_version(&staging)?;
+            if declared != version.to_string() {
+                return Err(format!("registry version mismatch for '{}': directory is {version}, manifest is {declared}", dependency.name));
+            }
             (format!("registry+{registry}"), version.to_string())
         }
     };
+    let declared_name = package_name(&staging)?;
+    if declared_name != dependency.name {
+        return Err(format!(
+            "dependency confusion rejected: requested '{}', package declares '{declared_name}'",
+            dependency.name
+        ));
+    }
     let checksum = tree_hash(&staging)?;
+    let signature = fs::read_to_string(staging.join(".ox-signature"))
+        .unwrap_or_else(|_| "unsigned".into())
+        .trim()
+        .replace('\n', ";");
     let destination = cache_root.join(&checksum);
     if destination.exists() {
         fs::remove_dir_all(&staging).map_err(|e| e.to_string())?;
@@ -319,6 +590,23 @@ fn resolve(
         fs::rename(&staging, &destination).map_err(|e| e.to_string())?;
     }
     let capabilities = capabilities(&destination)?;
+    if env::var("OX_REQUIRE_SIGNATURE").as_deref() == Ok("1")
+        && (signature == "unsigned" || signature.contains("signature=unsigned"))
+    {
+        return Err(format!("package '{}' is unsigned", dependency.name));
+    }
+    if let Ok(trusted) = env::var("OX_TRUSTED_KEYS") {
+        let key = signature
+            .split(';')
+            .find_map(|field| field.strip_prefix("key="))
+            .unwrap_or("unsigned");
+        if key != "unsigned" && !trusted.split(',').map(str::trim).any(|value| value == key) {
+            return Err(format!(
+                "package '{}' is signed by untrusted key '{key}'",
+                dependency.name
+            ));
+        }
+    }
     Ok(Locked {
         name: dependency.name.clone(),
         version,
@@ -326,6 +614,7 @@ fn resolve(
         checksum,
         cache: destination,
         capabilities,
+        signature,
     })
 }
 
@@ -489,19 +778,44 @@ fn package_version(root: &Path) -> Result<String, String> {
     ))
 }
 
+fn package_name(root: &Path) -> Result<String, String> {
+    let manifest = fs::read_to_string(root.join("ox.toml"))
+        .map_err(|e| format!("{}: {e}", root.join("ox.toml").display()))?;
+    for line in section_lines(&manifest, "package") {
+        if let Some(("name", value)) = line.split_once('=').map(|(a, b)| (a.trim(), b.trim())) {
+            return unquote(value);
+        }
+    }
+    Err(format!(
+        "{} has no package name",
+        root.join("ox.toml").display()
+    ))
+}
+
 fn render_lock(manifest: &str, packages: &[Locked]) -> String {
+    let mut chain = 0xcbf29ce484222325_u64;
+    for package in packages {
+        chain = hash_extend(chain, package.name.as_bytes());
+        chain = hash_extend(chain, package.version.as_bytes());
+        chain = hash_extend(chain, package.checksum.as_bytes());
+        chain = hash_extend(chain, package.signature.as_bytes());
+    }
     let mut output = format!(
-        "# Generated by Ox; do not edit.\nversion = 2\nmanifest = \"{:016x}\"\n",
-        stable_hash(manifest.as_bytes())
+        "# Generated by Ox; do not edit.\nversion = 3\nmanifest = \"{:016x}\"\nresolution = \"{chain:016x}\"\n",
+        stable_hash(manifest.as_bytes()),
     );
     for package in packages {
-        output.push_str(&format!("\n[[package]]\nname = {:?}\nversion = {:?}\nsource = {:?}\nchecksum = {:?}\ncache = {:?}\ncapabilities = {:?}\n", package.name, package.version, package.source, package.checksum, package.cache.to_string_lossy(), package.capabilities));
+        output.push_str(&format!("\n[[package]]\nname = {:?}\nversion = {:?}\nsource = {:?}\nchecksum = {:?}\ncache = {:?}\ncapabilities = {:?}\nsignature = {:?}\n", package.name, package.version, package.source, package.checksum, package.cache.to_string_lossy(), package.capabilities, package.signature));
     }
     output
 }
 
 fn parse_lock() -> Result<BTreeMap<String, Locked>, String> {
-    let contents = fs::read_to_string("ox.lock").map_err(|e| e.to_string())?;
+    parse_lock_from(Path::new("ox.lock"))
+}
+
+fn parse_lock_from(path: &Path) -> Result<BTreeMap<String, Locked>, String> {
+    let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let mut values = BTreeMap::new();
     for block in contents.split("[[package]]").skip(1) {
         let fields = block
@@ -524,6 +838,10 @@ fn parse_lock() -> Result<BTreeMap<String, Locked>, String> {
             checksum: get("checksum")?,
             cache: PathBuf::from(get("cache")?),
             capabilities: get("capabilities")?,
+            signature: fields
+                .get("signature")
+                .cloned()
+                .unwrap_or_else(|| "unsigned".into()),
         };
         values.insert(package.name.clone(), package);
     }
@@ -572,7 +890,19 @@ fn collect_files(root: &Path, current: &Path, output: &mut Vec<PathBuf>) -> Resu
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         let name = entry.file_name();
-        if name == ".git" || name == ".ox" || name == "target" {
+        if entry.file_type().map_err(|e| e.to_string())?.is_symlink() {
+            return Err(format!(
+                "symbolic links are not allowed in packages: {}",
+                path.display()
+            ));
+        }
+        if name == ".git"
+            || name == ".ox"
+            || name == "target"
+            || name == ".ox-checksum"
+            || name == ".ox-signature"
+            || name.to_string_lossy().ends_with(".oxpkg")
+        {
             continue;
         }
         if path.is_dir() {
@@ -589,7 +919,17 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name();
-        if name == ".git" || name == ".ox" || name == "target" {
+        if entry.file_type().map_err(|e| e.to_string())?.is_symlink() {
+            return Err(format!(
+                "symbolic links are not allowed in packages: {}",
+                entry.path().display()
+            ));
+        }
+        if name == ".git"
+            || name == ".ox"
+            || name == "target"
+            || name.to_string_lossy().ends_with(".oxpkg")
+        {
             continue;
         }
         let destination = target.join(&name);
@@ -648,6 +988,17 @@ fn validate_name(name: &str) -> Result<(), String> {
     } else {
         Err(format!("invalid package name '{name}'"))
     }
+}
+
+fn capability_set(manifest: &str) -> Result<BTreeSet<String>, String> {
+    validate_capabilities(manifest)?;
+    Ok(section_lines(manifest, "capabilities")
+        .into_iter()
+        .filter_map(|line| {
+            let (name, value) = line.split_once('=')?;
+            (value.trim() == "true").then(|| name.trim().to_owned())
+        })
+        .collect())
 }
 
 fn set_dependency(manifest: &str, name: &str, value: Option<&str>) -> Result<String, String> {

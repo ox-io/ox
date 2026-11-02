@@ -36,11 +36,16 @@ fn run(args: Vec<String>) -> Result<String, String> {
             RESERVED_KEYWORDS.join(" ")
         )),
         [command, path] if command == "check" || command == "test" => {
+            let project_root = find_project_root(std::path::Path::new(path))?;
             let source = load_modules(
                 std::path::Path::new(path),
+                project_root.as_deref(),
                 &mut Vec::new(),
                 &mut HashSet::new(),
             )?;
+            if let Some(root) = &project_root {
+                package::enforce_program_capabilities(&source, root)?;
+            }
             let tokens = lex(&source).map_err(|error| format!("{path}: {error}"))?;
             let program = parse(&tokens).map_err(|error| format!("{path}: {error}"))?;
             check(&program).map_err(|error| format!("{path}: {error}"))?;
@@ -68,12 +73,18 @@ fn run(args: Vec<String>) -> Result<String, String> {
         [command, name] if command == "remove" => package::remove(name),
         [command] if command == "vendor" => package::vendor(),
         [command] if command == "audit" => package::audit(),
-        _ => Err("usage: ox <check FILE|test FILE|init|lock [--offline]|add NAME SPEC|remove NAME|update|vendor|audit|keywords|version>".into()),
+        [command] if command == "pack" => package::pack(None),
+        [command, output] if command == "pack" => package::pack(Some(output)),
+        [command] if command == "publish" => package::publish(None),
+        [command, flag, registry] if command == "publish" && flag == "--registry" => package::publish(Some(registry)),
+        [command] if command == "workspace" => package::workspace(),
+        _ => Err("usage: ox <check FILE|test FILE|init|lock [--offline]|add NAME SPEC|remove NAME|update|vendor|audit|pack [OUTPUT]|publish [--registry PATH]|workspace|keywords|version>".into()),
     }
 }
 
 fn load_modules(
     path: &std::path::Path,
+    project_root: Option<&std::path::Path>,
     visiting: &mut Vec<std::path::PathBuf>,
     loaded: &mut HashSet<std::path::PathBuf>,
 ) -> Result<String, String> {
@@ -100,10 +111,26 @@ fn load_modules(
             }
             dependencies.push_str(&load_modules(
                 &path.parent().unwrap().join(&rest[..end]),
+                project_root,
                 visiting,
                 loaded,
             )?);
             dependencies.push('\n');
+        } else if let Some(rest) = trimmed.strip_prefix("use ") {
+            let module = rest.trim_end_matches(';').trim();
+            if let Some(root) = project_root {
+                if let Some(module_path) = package::resolve_import(module, root)? {
+                    dependencies.push_str(&load_modules(
+                        &module_path,
+                        project_root,
+                        visiting,
+                        loaded,
+                    )?);
+                    dependencies.push('\n');
+                    continue;
+                }
+            }
+            body.push(line);
         } else {
             body.push(line);
         }
@@ -119,4 +146,20 @@ fn load_modules(
         .replace("pub choice ", "choice ")
         .replace("pub api ", "api ");
     Ok(format!("{dependencies}{body}"))
+}
+
+fn find_project_root(entry: &std::path::Path) -> Result<Option<std::path::PathBuf>, String> {
+    let absolute = entry
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", entry.display()))?;
+    for ancestor in absolute
+        .parent()
+        .into_iter()
+        .flat_map(std::path::Path::ancestors)
+    {
+        if ancestor.join("ox.toml").is_file() {
+            return Ok(Some(ancestor.to_owned()));
+        }
+    }
+    Ok(None)
 }

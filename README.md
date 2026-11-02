@@ -58,12 +58,30 @@ ox lock --offline
 ox update
 ox vendor
 ox audit
+ox pack
+ox publish --registry ../registry
+ox workspace
+```
+
+Locked packages are imported directly from verified cache objects:
+
+```ox
+use codec.math;
+
+fx main(): Int { double(21) }
 ```
 
 Package capabilities are deny-by-default metadata recorded in the lockfile.
 `ox audit` reads `OX_ADVISORY_DB` (default `.ox/advisories.txt`) entries formatted
 as `package|version|advisory` and exits unsuccessfully when a locked version is
 affected.
+
+Lockfile format 3 adds a dependency checksum chain and signature identity field.
+`OX_REQUIRE_SIGNATURE=1` rejects unsigned packages and `OX_TRUSTED_KEYS` restricts
+accepted signing identities. Alpha.8 validates the metadata envelope and content
+integrity; cryptographic signature verification is still required before 1.0.
+Capability checks cover Ox built-ins and dependency grants, not an operating-system
+sandbox.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for crate boundaries and frontend flow.
 
