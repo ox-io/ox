@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "ox-ast"
-version = "0.2.0"
+version = "0.2.0-alpha.3"
 
 [[package]]
 name = "ox-cli"
-version = "0.2.0"
+version = "0.2.0-alpha.3"
 dependencies = [
  "ox-lexer",
  "ox-parser",
@@ -17,29 +17,29 @@ dependencies = [
 
 [[package]]
 name = "ox-codegen-js"
-version = "0.2.0"
+version = "0.2.0-alpha.3"
 dependencies = [
  "ox-ast",
 ]
 
 [[package]]
 name = "ox-diagnostics"
-version = "0.2.0"
+version = "0.2.0-alpha.3"
 
 [[package]]
 name = "ox-formatter"
-version = "0.2.0"
+version = "0.2.0-alpha.3"
 
 [[package]]
 name = "ox-lexer"
-version = "0.2.0"
+version = "0.2.0-alpha.3"
 dependencies = [
  "ox-diagnostics",
 ]
 
 [[package]]
 name = "ox-parser"
-version = "0.2.0"
+version = "0.2.0-alpha.3"
 dependencies = [
  "ox-ast",
  "ox-diagnostics",
@@ -48,15 +48,15 @@ dependencies = [
 
 [[package]]
 name = "ox-runtime"
-version = "0.2.0"
+version = "0.2.0-alpha.3"
 
 [[package]]
 name = "ox-source"
-version = "0.2.0"
+version = "0.2.0-alpha.3"
 
 [[package]]
 name = "ox-types"
-version = "0.2.0"
+version = "0.2.0-alpha.3"
 dependencies = [
  "ox-ast",
  "ox-diagnostics",
