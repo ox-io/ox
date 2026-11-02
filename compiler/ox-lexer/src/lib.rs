@@ -4,12 +4,11 @@ use std::ops::Range;
 pub const CANONICAL_KEYWORDS: &[&str] = &[
     "fx", "val", "mut", "ret", "if", "else", "loop", "stop", "skip", "api", "use", "GET", "POST",
     "PUT", "PATCH", "DELETE", "true", "false", "shape", "choice", "pick", "case", "other", "try",
-    "catch", "fail", "test",
+    "catch", "fail", "fails", "test", "pub", "as",
 ];
 
 pub const RESERVED_KEYWORDS: &[&str] = &[
-    "none", "defer", "task", "wait", "spawn", "race", "chan", "recv", "as", "pub", "trait", "impl",
-    "self",
+    "none", "defer", "task", "wait", "spawn", "race", "chan", "recv", "trait", "impl", "self",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]

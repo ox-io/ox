@@ -1,0 +1,28 @@
+name: Release artifacts
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - run: cargo build --release -p ox-cli
+      - run: sha256sum target/release/ox > target/release/ox.sha256
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: target/release/ox
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ox-linux-x64
+          path: |
+            target/release/ox
+            target/release/ox.sha256
