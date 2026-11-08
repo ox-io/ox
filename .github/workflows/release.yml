@@ -25,7 +25,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then echo "OX_BINARY=target/release/ox.exe" >> "$GITHUB_ENV"; else echo "OX_BINARY=target/release/ox" >> "$GITHUB_ENV"; fi
       - shell: bash
         run: sha256sum "$OX_BINARY" > "$OX_BINARY.sha256"
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ env.OX_BINARY }}
       - uses: actions/upload-artifact@v4
